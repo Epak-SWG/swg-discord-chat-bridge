@@ -1,4 +1,4 @@
-# SWG Discord Chat Bridge v2
+# SWG Discord Chat Bridge
 
 A Python bot that bridges SWG in-game chatrooms to Discord channels. Drop a JSON config file per server — each one spawns an independent bot instance that logs into the game, joins a chatroom, and relays messages both ways.
 
