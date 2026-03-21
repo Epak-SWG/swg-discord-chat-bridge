@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+logs/
+*.log
+node_modules/
+
+# Configs contain bot tokens and passwords — never commit
+configs/*.json
+!configs/example.json
