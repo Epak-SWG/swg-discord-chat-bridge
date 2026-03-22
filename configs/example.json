@@ -15,6 +15,7 @@
         "BotToken": "YOUR_DISCORD_BOT_TOKEN_HERE",
         "ServerID": "123456789012345678",
         "ChatChannel": "cantina-chat",
+        "_CommentChatChannel": "Destination for SWG -> Discord relay only; Discord messages are not sent into SWG.",
         "NotificationChannel": "server-status",
         "NotificationMentionRole": "Server Admin",
         "NotificationMentionUserID": "111111111111111111",
