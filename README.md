@@ -1,6 +1,6 @@
 # SWG Discord Chat Bridge
 
-A Python bot that bridges SWG in-game chatrooms to Discord channels. Drop a JSON config file per server — each one spawns an independent bot instance that logs into the game, joins a chatroom, and relays messages both ways.
+A Python bot that relays SWG in-game chatrooms into Discord channels (`SWG → Discord`). Drop a JSON config file per server — each one spawns an independent bot instance that logs into the game, joins a chatroom, and forwards SWG chat into Discord.
 
 Replaces the original 14-bot Node.js setup with a single Python process. Based on the original [swg-discord-bot](https://github.com/dpwhittaker/swg-discord-bot) by [dpwhittaker](https://github.com/dpwhittaker), which implemented the SOE protocol and SWG chat bridge in Node.js.
 
@@ -75,11 +75,13 @@ Each bot needs a JSON file in the `configs/` folder. See `configs/example.json` 
 
 ### Discord Section
 
+> **Note:** `ChatChannel` is the Discord destination for SWG chat messages. Discord messages from that channel are **not** relayed into SWG (`SWG → Discord` only).
+
 | Key | Required | Description |
 |-----|----------|-------------|
 | `BotToken` | Yes | Discord bot token |
 | `ServerID` | Yes | Discord guild/server ID |
-| `ChatChannel` | Yes | Discord channel name for chat bridge |
+| `ChatChannel` | Yes | Discord destination channel name for SWG chat (`SWG → Discord` only) |
 | `BotName` | No | Display name in logs (default: config filename) |
 | `PresenceName` | No | Bot's "Watching ___" status (default: "in-game") |
 | `NotificationChannel` | No | Channel name for server up/down alerts |
@@ -119,7 +121,7 @@ Also accepts a simple list format: `"AdminUserIDs": ["231103549025681419"]`
 ## Architecture
 
 ```
-Discord ←→ ChatBridge (discord.py) ←→ SWGChatClient (UDP) ←→ SWG Server
+SWG Server → SWGChatClient (UDP) → ChatBridge (discord.py) → Discord
                                            |
                                       SOEProtocol
                                     (session, encrypt,
@@ -141,7 +143,7 @@ Discord ←→ ChatBridge (discord.py) ←→ SWGChatClient (UDP) ←→ SWG Ser
 1. **Login:** Bot connects to SWG login server via UDP, authenticates, gets character list
 2. **Zone:** Selects character, connects to zone server, receives world state
 3. **Chat:** Creates/queries chatroom by path, enters room by ID, begins relaying
-4. **Bridge:** SWG chat messages → Discord channel. Discord messages → SWG chatroom (with colored sender name)
+4. **Bridge:** SWG chat messages are posted to the configured Discord `ChatChannel` destination (`SWG → Discord` only)
 5. **Health:** Every 60s, re-queries chatroom to verify membership. Logs metrics every 5 min
 6. **Hot-reload:** Every 10s, scans config directory for added/removed files
 
@@ -158,7 +160,6 @@ SWG timeout (10s no packets)
 ### Message Format
 
 - **SWG → Discord:** `**PlayerName:**  message text`
-- **Discord → SWG:** `\#ff3333SenderName: \#ff66ffmessage text` (colored in-game)
 
 ## Hot-Reload
 
@@ -218,8 +219,8 @@ The SWG server may be down or unreachable. The bot uses exponential backoff (2s 
 **Q: How do I restart just one bot without affecting others?**
 Use `!fixchat` in Discord (admin only), or rename the config file away and back. The hot-reload watcher handles it automatically.
 
-**Q: Messages from Discord aren't showing up in-game.**
-Check that the bot's character is actually in the chatroom — use `!status` to verify the room ID is set. If room ID is `None`, the bot failed to join. Check SWG logs with `verboseSWGLogging: true`.
+**Q: Why don't Discord messages appear in-game?**
+This bridge is intentionally one-way (`SWG → Discord`). Discord chat is not relayed back into SWG chatrooms.
 
 **Q: Can the bot handle server restarts automatically?**
 Yes. When the SWG server goes down, the bot detects the timeout after 10 seconds, notifies Discord (if `NotificationChannel` is set), and reconnects with exponential backoff. When the server comes back, it logs in, joins the chatroom, and notifies Discord it's back up.
@@ -240,7 +241,7 @@ SOE (Sony Online Entertainment) UDP protocol with session management, CRC encryp
 The bot's character zones into the world at its last saved position. It doesn't move or interact — it only handles chat. Other players will see the character standing idle.
 
 **Q: Can I bridge multiple chatrooms to different Discord channels?**
-Currently each config bridges one SWG chatroom to one Discord channel. For multiple rooms, create multiple configs with different characters and channels (each needs its own Discord bot token).
+Currently each config forwards one SWG chatroom to one Discord destination channel. For multiple rooms, create multiple configs with different characters and channels (each needs its own Discord bot token).
 
 **Q: What happens if Discord goes down?**
 discord.py has built-in reconnection (`reconnect=True`). The SWG connection stays alive during Discord outages. When Discord comes back, the bot resumes relaying without restarting.
