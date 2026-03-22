@@ -598,6 +598,7 @@ class ChatBridge(discord.Client):
 
     async def on_ready(self):
         self.log.info(f"Discord ready: {self.user}")
+        self.log.info("Bridge mode: one-way (SWG -> Discord). Discord chat forwarding to SWG is disabled.")
 
         self.server_guild = self.get_guild(int(self.discord_cfg['ServerID']))
         if not self.server_guild:
@@ -706,9 +707,7 @@ class ChatBridge(discord.Client):
             await message.reply(f"Enabling debug mode for {self.bot_name} (SWG + Discord verbose)")
             self.log.info(f"!debugchat from {sender}")
 
-        # Forward chat channel messages to SWG
-        if isinstance(message.channel, discord.TextChannel) and message.channel.name == self.discord_cfg['ChatChannel']:
-            self.swg.send_chat(message.clean_content, sender)
+        # Discord chat forwarding is intentionally disabled (one-way bridge: SWG -> Discord).
 
     async def _send_to_discord(self, channel, content, retries=3):
         """Send a message to Discord with retry logic."""
