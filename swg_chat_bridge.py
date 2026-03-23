@@ -21,6 +21,7 @@ import time
 import logging
 import signal
 import pathlib
+import socket
 
 import discord
 
@@ -66,6 +67,8 @@ class SWGChatClient:
         self.host = cfg['LoginAddress']
         self.port = int(cfg['LoginPort'])
         self.ping_port = None
+        self.remote_addr = None
+        self.addr_family = socket.AF_INET
         self.logged_in = False
         self.connected = False
         self.paused = False
@@ -130,17 +133,29 @@ class SWGChatClient:
         self.host = self.cfg['LoginAddress']
         self.port = int(self.cfg['LoginPort'])
         self.ping_port = None
+        self.remote_addr = None
         self.protocol = SOEProtocol()
 
         if self.transport:
             self.transport.close()
 
+        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_DGRAM)
+        family, _, _, _, sockaddr = infos[0]
+        self.addr_family = family
+        self.remote_addr = sockaddr
+
+        local_addr = ('0.0.0.0', 0)
+        if family == socket.AF_INET6:
+            local_addr = ('::', 0, 0, 0)
+
         loop = asyncio.get_running_loop()
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _UDPProtocol(self._on_data),
-            local_addr=('0.0.0.0', 0)
+            family=family,
+            local_addr=local_addr,
         )
         self.transport = transport
+        self.log.info(f"UDP endpoint {local_addr} -> {self.remote_addr}")
         self._send_raw(self.protocol.encode_session_request())
 
     def _send_raw(self, data):
@@ -149,9 +164,9 @@ class SWGChatClient:
             return
         if isinstance(data, list):
             for d in data:
-                self.transport.sendto(bytes(d), (self.host, self.port))
+                self.transport.sendto(bytes(d), self.remote_addr)
         else:
-            self.transport.sendto(bytes(data), (self.host, self.port))
+            self.transport.sendto(bytes(data), self.remote_addr)
 
     def _on_data(self, data, addr):
         """Handle incoming UDP packet."""
@@ -217,6 +232,9 @@ class SWGChatClient:
 
         server_id = character['server_id']
         server_data = self.servers.get(server_id, {})
+        zone_ip = server_data.get('ip')
+        if zone_ip:
+            self.host = zone_ip
         try:
             self.port = int(server_data.get('port', self.port))
         except (TypeError, ValueError):
@@ -484,7 +502,11 @@ class SWGChatClient:
             struct.pack_into('>H', buf, 0, tick)
             struct.pack_into('>H', buf, 2, 0x7701)
             if self.transport:
-                self.transport.sendto(bytes(buf), (self.host, self.ping_port))
+                if self.addr_family == socket.AF_INET6 and len(self.remote_addr) == 4:
+                    ping_addr = (self.remote_addr[0], self.ping_port, self.remote_addr[2], self.remote_addr[3])
+                else:
+                    ping_addr = (self.remote_addr[0], self.ping_port)
+                self.transport.sendto(bytes(buf), ping_addr)
 
     async def _netstatus_loop(self):
         """Send net status every 15 seconds."""
