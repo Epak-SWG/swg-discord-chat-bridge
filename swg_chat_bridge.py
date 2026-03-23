@@ -148,11 +148,17 @@ class SWGChatClient:
         if family == socket.AF_INET6:
             local_addr = ('::', 0, 0, 0)
 
+        udp_sock = socket.socket(family, socket.SOCK_DGRAM)
+        udp_sock.bind(local_addr)
+        if os.name == 'nt' and hasattr(socket, 'SIO_UDP_CONNRESET'):
+            # Ignore ICMP "port unreachable" as socket-level hard errors on Windows.
+            # Without this, Windows can surface WinError 10022/10054 via error_received.
+            udp_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+
         loop = asyncio.get_running_loop()
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _UDPProtocol(self._on_data),
-            family=family,
-            local_addr=local_addr,
+            sock=udp_sock,
         )
         self.transport = transport
         self.log.info(f"UDP endpoint {local_addr} -> {self.remote_addr}")
