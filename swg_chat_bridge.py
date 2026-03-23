@@ -139,8 +139,7 @@ class SWGChatClient:
         if self.transport:
             self.transport.close()
 
-        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_DGRAM)
-        family, _, _, _, sockaddr = infos[0]
+        family, sockaddr = self._resolve_remote(self.host, self.port)
         self.addr_family = family
         self.remote_addr = sockaddr
 
@@ -163,6 +162,12 @@ class SWGChatClient:
         self.transport = transport
         self.log.info(f"UDP endpoint {local_addr} -> {self.remote_addr}")
         self._send_raw(self.protocol.encode_session_request())
+
+    @staticmethod
+    def _resolve_remote(host, port):
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        family, _, _, _, sockaddr = infos[0]
+        return family, sockaddr
 
     def _send_raw(self, data):
         """Send raw bytes to current server."""
@@ -252,6 +257,20 @@ class SWGChatClient:
             except (TypeError, ValueError):
                 self.log.warning(f"Invalid ping port in server data: {ping_port!r}; disabling ping")
                 self.ping_port = None
+
+        try:
+            family, sockaddr = self._resolve_remote(self.host, self.port)
+            if family != self.addr_family:
+                self.log.warning(
+                    f"Zone endpoint family changed ({self.addr_family} -> {family}); reconnecting socket"
+                )
+                asyncio.ensure_future(self._reconnect())
+                return
+            self.remote_addr = sockaddr
+            self.log.info(f"Switching UDP remote endpoint -> {self.remote_addr}")
+        except OSError as e:
+            self.log.error(f"Failed to resolve zone endpoint {self.host}:{self.port}: {e}")
+            return
         self.character_id = character['character_id']
 
         if server_id in self.server_names:
