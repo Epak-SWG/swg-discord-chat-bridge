@@ -7,6 +7,7 @@ Replaces the original 14-bot Node.js setup with a single Python process. Based o
 ## Features
 
 - **Multi-bot from one process** — each `.json` config in `configs/` spawns a separate bot
+- **Multi-room mapping per bot** — one bot can bridge multiple SWG chatrooms to different Discord channels
 - **Hot-reload** — add/remove config files without restarting; watcher scans every 10 seconds
 - **Auto-reconnect** — exponential backoff (2s → 60s) on SWG disconnect, auto-restart on crash
 - **Health checks** — periodic chatroom verification, Docker healthcheck support, metrics logging
@@ -70,7 +71,8 @@ Each bot needs a JSON file in the `configs/` folder. See `configs/example.json` 
 | `Username` | Yes | SWG account username |
 | `Password` | Yes | SWG account password (empty string if none) |
 | `Character` | Yes | Character name to log in as |
-| `ChatRoom` | Yes | Chatroom path (e.g., `SWG.ServerName.RoomName`) |
+| `ChatRoom` | Conditional | Legacy single-room path (e.g., `SWG.ServerName.RoomName`) |
+| `ChatBridges` | Conditional | Multi-room mappings list (`[{ "ChatRoom": "...", "ChatChannel": "..." }]`) |
 | `verboseSWGLogging` | No | Log all SWG packets (default: false) |
 
 ### Discord Section
@@ -81,7 +83,7 @@ Each bot needs a JSON file in the `configs/` folder. See `configs/example.json` 
 |-----|----------|-------------|
 | `BotToken` | Yes | Discord bot token |
 | `ServerID` | Yes | Discord guild/server ID |
-| `ChatChannel` | Yes | Discord destination channel name for SWG chat (`SWG → Discord` only) |
+| `ChatChannel` | Conditional | Legacy single-room destination channel name for SWG chat (`SWG → Discord` only) |
 | `BotName` | No | Display name in logs (default: config filename) |
 | `PresenceName` | No | Bot's "Watching ___" status (default: "in-game") |
 | `NotificationChannel` | No | Channel name for server up/down alerts |
@@ -143,8 +145,8 @@ SWG Server → SWGChatClient (UDP) → ChatBridge (discord.py) → Discord
 1. **Login:** Bot connects to SWG login server via UDP, authenticates, gets character list
 2. **Zone:** Selects character, connects to zone server, receives world state
 3. **Chat:** Creates/queries chatroom by path, enters room by ID, begins relaying
-4. **Bridge:** SWG chat messages are posted to the configured Discord `ChatChannel` destination (`SWG → Discord` only)
-5. **Health:** Every 60s, re-queries chatroom to verify membership. Logs metrics every 5 min
+4. **Bridge:** SWG chat messages are posted to the mapped Discord destination channel (`SWG → Discord` only)
+5. **Health:** Every 60s, re-queries all configured chatrooms to verify membership. Logs metrics every 5 min
 6. **Hot-reload:** Every 10s, scans config directory for added/removed files
 
 ### Reconnection Flow
@@ -241,7 +243,22 @@ SOE (Sony Online Entertainment) UDP protocol with session management, CRC encryp
 The bot's character zones into the world at its last saved position. It doesn't move or interact — it only handles chat. Other players will see the character standing idle.
 
 **Q: Can I bridge multiple chatrooms to different Discord channels?**
-Currently each config forwards one SWG chatroom to one Discord destination channel. For multiple rooms, create multiple configs with different characters and channels (each needs its own Discord bot token).
+Yes. Use `SWG.ChatBridges` to define multiple `{ ChatRoom, ChatChannel }` mappings in one config. The bot joins each room and routes each room's messages to its mapped Discord channel.
 
 **Q: What happens if Discord goes down?**
 discord.py has built-in reconnection (`reconnect=True`). The SWG connection stays alive during Discord outages. When Discord comes back, the bot resumes relaying without restarting.
+### Multi-Room Mapping (one bot token, many rooms/channels)
+
+You can now map multiple SWG rooms to different Discord channels from one bot instance:
+
+```json
+"SWG": {
+  "...": "...",
+  "ChatBridges": [
+    { "ChatRoom": "SWG.Dantooine.Cantina", "ChatChannel": "cantina-chat" },
+    { "ChatRoom": "SWG.Dantooine.Galaxy", "ChatChannel": "galaxy-chat" }
+  ]
+}
+```
+
+When `SWG.ChatBridges` is present, it takes precedence over legacy `SWG.ChatRoom` + `Discord.ChatChannel`.
