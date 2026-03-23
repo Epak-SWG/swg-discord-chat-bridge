@@ -64,7 +64,7 @@ class SWGChatClient:
 
         # State
         self.host = cfg['LoginAddress']
-        self.port = cfg['LoginPort']
+        self.port = int(cfg['LoginPort'])
         self.ping_port = None
         self.logged_in = False
         self.connected = False
@@ -128,7 +128,7 @@ class SWGChatClient:
         self.logged_in = False
         self.connected = False
         self.host = self.cfg['LoginAddress']
-        self.port = self.cfg['LoginPort']
+        self.port = int(self.cfg['LoginPort'])
         self.ping_port = None
         self.protocol = SOEProtocol()
 
@@ -217,8 +217,17 @@ class SWGChatClient:
 
         server_id = character['server_id']
         server_data = self.servers.get(server_id, {})
-        self.port = server_data.get('port', self.port)
-        self.ping_port = server_data.get('ping_port')
+        try:
+            self.port = int(server_data.get('port', self.port))
+        except (TypeError, ValueError):
+            self.log.warning(f"Invalid zone port in server data: {server_data.get('port')!r}; keeping {self.port}")
+        ping_port = server_data.get('ping_port')
+        if ping_port is not None:
+            try:
+                self.ping_port = int(ping_port)
+            except (TypeError, ValueError):
+                self.log.warning(f"Invalid ping port in server data: {ping_port!r}; disabling ping")
+                self.ping_port = None
         self.character_id = character['character_id']
 
         if server_id in self.server_names:
@@ -834,6 +843,14 @@ def validate_config(cfg, filename):
         int(cfg['Discord']['ServerID'])
     except (ValueError, TypeError):
         return f"ServerID must be a valid integer"
+
+    try:
+        login_port = int(cfg['SWG']['LoginPort'])
+    except (ValueError, TypeError):
+        return f"SWG.LoginPort must be a valid integer"
+    if login_port <= 0 or login_port > 65535:
+        return f"SWG.LoginPort must be between 1 and 65535"
+    cfg['SWG']['LoginPort'] = login_port
 
     mappings = cfg['SWG'].get('ChatBridges', [])
     if mappings:
