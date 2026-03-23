@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 REM Start script for SWG Discord Chat Bridge (Windows)
 REM Usage:
@@ -36,5 +36,10 @@ if "%CONFIG_ARG%"=="" (
 goto :eof
 
 :error
-echo [ERROR] Failed to start bot. See messages above.
-exit /b 1
+set "ERR=%ERRORLEVEL%"
+if "%ERR%"=="" set "ERR=1"
+echo [ERROR] Failed to start bot. Exit code: %ERR%
+echo [ERROR] Review the messages above to identify the problem.
+echo.
+pause
+exit /b %ERR%
