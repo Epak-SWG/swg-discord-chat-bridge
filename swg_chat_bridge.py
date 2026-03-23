@@ -932,6 +932,20 @@ async def _healthcheck_loop():
 
 async def run_all(config_path):
     """Load configs and run bots with hot-reload — watches for added/removed config files."""
+    def _install_signal_handlers(cancel_cb):
+        """Install SIGINT/SIGTERM handlers where supported (Unix)."""
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, cancel_cb)
+            except NotImplementedError:
+                # Windows asyncio event loops may not support add_signal_handler.
+                main_log.warning(
+                    "Signal handlers not supported on this platform; "
+                    "use Ctrl+C to stop the bridge."
+                )
+                return
+
     path = pathlib.Path(config_path)
     if not path.is_dir():
         # Single file mode — no hot reload
@@ -942,9 +956,7 @@ async def run_all(config_path):
         main_log.info(f"Starting {len(configs)} bot(s) (single file, no hot-reload)")
         tasks = [asyncio.create_task(run_bot(name, cfg)) for name, cfg in configs]
         tasks.append(asyncio.create_task(_healthcheck_loop()))
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: [t.cancel() for t in tasks])
+        _install_signal_handlers(lambda: [t.cancel() for t in tasks])
         await asyncio.gather(*tasks, return_exceptions=True)
         main_log.info("All bots stopped")
         return
@@ -960,9 +972,7 @@ async def run_all(config_path):
         for t in all_tasks:
             t.cancel()
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _cancel_all)
+    _install_signal_handlers(_cancel_all)
 
     async def _config_watcher():
         """Scan config directory every 10 seconds for changes."""
