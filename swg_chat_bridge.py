@@ -559,14 +559,13 @@ class ChatBridge(discord.Client):
     """Discord client that bridges to SWG chat."""
 
     def __init__(self, bot_cfg, config_name):
+        self.discord_cfg = bot_cfg['Discord']
         intents = discord.Intents.default()
-        intents.message_content = True
+        intents.message_content = bool(self.discord_cfg.get('EnableMessageContentIntent', False))
         intents.guilds = True
-        intents.members = True
         super().__init__(intents=intents)
 
         self.swg_cfg = dict(bot_cfg['SWG'])
-        self.discord_cfg = bot_cfg['Discord']
         self.config_name = config_name
         self.bot_name = self.discord_cfg.get('BotName', config_name)
         self.log = logging.getLogger(config_name)
@@ -906,12 +905,24 @@ async def run_bot(name, bot_cfg):
         except asyncio.CancelledError:
             log.info("Shutting down")
             break
+        except discord.PrivilegedIntentsRequired as e:
+            log.error(f"Crashed: {e}")
+            log.error(
+                "Fatal configuration error: this bot requested privileged intents that are not enabled. "
+                "Either enable the required intents in the Discord Developer Portal, or set "
+                "Discord.EnableMessageContentIntent to false in this bot's config."
+            )
+            break
         except Exception as e:
             log.error(f"Crashed: {e}")
         finally:
             if bridge:
                 try:
                     await bridge.swg.disconnect()
+                except Exception:
+                    pass
+                try:
+                    await bridge.close()
                 except Exception:
                     pass
 

@@ -103,7 +103,10 @@ Each bot needs a JSON file in the `configs/` folder. See `configs/example.json` 
 | `AdminUsers` | No | Dict of user IDs → labels who can run admin commands |
 | `AdminChannels` | No | Dict of channel IDs → labels where admin commands work |
 | `AutoRestartTimer` | No | Auto-restart bot after N minutes (0 = disabled) |
+| `EnableMessageContentIntent` | No | Enable Discord Message Content privileged intent for command parsing (default: false) |
 | `verboseDiscordLogging` | No | Log all Discord messages (default: false) |
+
+> **Note:** `!server`, `!status`, and admin commands rely on Discord message content access. If `EnableMessageContentIntent` is `false`, SWG → Discord relay still works, but text commands may not.
 
 ### Admin Permissions
 
