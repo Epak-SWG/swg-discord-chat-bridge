@@ -46,7 +46,7 @@ REM Or run one config file
 start_bot.bat configs\my-server.json
 ```
 
-The script will create `.venv` (if missing), install dependencies once, and start the bridge. If startup fails, it pauses so you can read the error before the window closes.
+The script will create `.venv` (if missing), install dependencies once, and start the bridge. It always writes console output to `start_bot.log` in the repo root, and if startup fails it pauses so you can read the on-screen error and check the log file.
 
 ### Run with Docker
 
