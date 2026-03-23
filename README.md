@@ -37,6 +37,17 @@ python3 swg_chat_bridge.py
 python3 swg_chat_bridge.py configs/my-server.json
 ```
 
+### Run on Windows (batch file)
+
+```bat
+start_bot.bat
+
+REM Or run one config file
+start_bot.bat configs\my-server.json
+```
+
+The script will create `.venv` (if missing), install dependencies once, and start the bridge.
+
 ### Run with Docker
 
 ```bash
