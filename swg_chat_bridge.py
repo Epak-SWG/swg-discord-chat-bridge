@@ -40,8 +40,8 @@ main_log = logging.getLogger('main')
 HEALTHCHECK_FILE = os.environ.get('HEALTHCHECK_FILE', '/tmp/chatbridge_alive')
 
 # Required config keys for validation
-REQUIRED_SWG_KEYS = {'LoginAddress', 'LoginPort', 'Character', 'ChatRoom', 'Username', 'Password'}
-REQUIRED_DISCORD_KEYS = {'BotToken', 'ServerID', 'ChatChannel'}
+REQUIRED_SWG_KEYS = {'LoginAddress', 'LoginPort', 'Character', 'Username', 'Password'}
+REQUIRED_DISCORD_KEYS = {'BotToken', 'ServerID'}
 
 
 # =============================================================================
@@ -74,8 +74,11 @@ class SWGChatClient:
         self.server_names = {}
         self.servers = {}
         self.character_id = None
-        self.chat_room_id = None
-        self.chat_room_path = cfg['ChatRoom']
+        self.chat_room_id = None  # primary room (first configured), for backwards-compatible status output
+        raw_rooms = cfg.get('ChatRooms') or [cfg['ChatRoom']]
+        self.chat_room_paths = list(dict.fromkeys(raw_rooms))
+        self.chat_room_ids = {}     # normalized room path -> room id
+        self.room_id_to_path = {}   # room id -> normalized room path
 
         self.last_message_time = time.time()
         self.fails = 0
@@ -232,16 +235,19 @@ class SWGChatClient:
         self._send_raw(self.protocol.encode_select_character(self.character_id))
         asyncio.get_running_loop().call_later(1.0, self._create_chatroom)
 
-    def _create_chatroom(self):
-        """Create the chatroom (also serves as join if it exists)."""
-        room_path = self.chat_room_path
-        if not room_path.startswith("SWG."):
-            room_path = f"SWG.{self.server_name}.{room_path}"
+    def _normalize_room_path(self, room_path):
+        if room_path.startswith("SWG."):
+            return room_path
+        return f"SWG.{self.server_name}.{room_path}"
 
-        self.log.info(f"Creating/joining chatroom: {room_path}")
-        self._send_raw(self._encode_chat_create_room(room_path))
-        # Also query the room to get its ID (create returns error 24 if room exists)
-        asyncio.get_running_loop().call_later(0.5, self._query_chatroom, room_path)
+    def _create_chatroom(self):
+        """Create the chatrooms (also serves as join if they exist)."""
+        for room_path in self.chat_room_paths:
+            normalized_room = self._normalize_room_path(room_path)
+            self.log.info(f"Creating/joining chatroom: {normalized_room}")
+            self._send_raw(self._encode_chat_create_room(normalized_room))
+            # Also query the room to get its ID (create returns error 24 if room exists)
+            asyncio.get_running_loop().call_later(0.5, self._query_chatroom, normalized_room)
         asyncio.get_running_loop().call_later(1.0, self._send_scene_ready)
 
     def _query_chatroom(self, room_path):
@@ -254,14 +260,18 @@ class SWGChatClient:
 
     def _handle_ChatRoomList(self, pkt):
         rooms = pkt.get('rooms', {})
-        target_room = self.chat_room_path
+        target_rooms = {self._normalize_room_path(room_path) for room_path in self.chat_room_paths}
         for room_id, room in rooms.items():
             room_path = room.get('path', '')
-            if room_path.endswith(target_room) or target_room in room_path:
-                self.chat_room_id = room.get('id', room_id)
-                self.log.info(f"Found chatroom: {room_path} (ID: {self.chat_room_id})")
-                self._send_raw(self._encode_chat_enter_room(self.chat_room_id))
-                break
+            normalized_path = self._normalize_room_path(room_path)
+            if normalized_path in target_rooms:
+                found_id = room.get('id', room_id)
+                self.chat_room_ids[normalized_path] = found_id
+                self.room_id_to_path[found_id] = normalized_path
+                if self.chat_room_id is None:
+                    self.chat_room_id = found_id
+                self.log.info(f"Found chatroom: {normalized_path} (ID: {found_id})")
+                self._send_raw(self._encode_chat_enter_room(found_id))
 
     def _handle_ChatOnCreateRoom(self, pkt):
         """Server response to our create/join room request."""
@@ -269,10 +279,14 @@ class SWGChatClient:
         room_id = pkt.get('room_id', 0)
         error = pkt.get('error', 0)
         if room_id and room_path:
-            target = self.chat_room_path
-            if target in room_path or room_path.endswith(target.split('.')[-1]):
-                self.chat_room_id = room_id
-                self.log.info(f"Created chatroom: {room_path} (ID: {room_id})")
+            normalized_path = self._normalize_room_path(room_path)
+            targets = {self._normalize_room_path(room) for room in self.chat_room_paths}
+            if normalized_path in targets:
+                self.chat_room_ids[normalized_path] = room_id
+                self.room_id_to_path[room_id] = normalized_path
+                if self.chat_room_id is None:
+                    self.chat_room_id = room_id
+                self.log.info(f"Created chatroom: {normalized_path} (ID: {room_id})")
                 self._send_raw(self._encode_chat_enter_room(room_id))
         else:
             self.log.debug(f"ChatOnCreateRoom error {error} — room may already exist, waiting for query result")
@@ -281,16 +295,20 @@ class SWGChatClient:
         """Server response to ChatQueryRoom — gives us room ID from path."""
         room_path = pkt.get('room_path', '')
         room_id = pkt.get('room_id', 0)
-        target = self.chat_room_path
-        if room_id and (target in room_path or room_path.endswith(target.split('.')[-1])):
-            self.chat_room_id = room_id
-            self.log.info(f"Found chatroom via query: {room_path} (ID: {room_id})")
+        normalized_path = self._normalize_room_path(room_path)
+        targets = {self._normalize_room_path(room) for room in self.chat_room_paths}
+        if room_id and normalized_path in targets:
+            self.chat_room_ids[normalized_path] = room_id
+            self.room_id_to_path[room_id] = normalized_path
+            if self.chat_room_id is None:
+                self.chat_room_id = room_id
+            self.log.info(f"Found chatroom via query: {normalized_path} (ID: {room_id})")
             self._send_raw(self._encode_chat_enter_room(room_id))
 
     def _handle_ChatOnEnteredRoom(self, pkt):
         player = pkt.get('player', '')
         room_id = pkt.get('room_id', 0)
-        if room_id == self.chat_room_id and player.lower() == self.character.lower():
+        if room_id in self.room_id_to_path and player.lower() == self.character.lower():
             if not self.connected:
                 self.connected = True
                 self.log.info(f"Entered chatroom ID# {room_id} as {player}")
@@ -303,10 +321,10 @@ class SWGChatClient:
         char_name = pkt.get('character', '')
         room_id = pkt.get('room_id', 0)
         message = pkt.get('message', '')
-        if room_id == self.chat_room_id and char_name.lower() != self.character.lower():
+        if room_id in self.room_id_to_path and char_name.lower() != self.character.lower():
             self.messages_received += 1
             if not self.paused:
-                self.on_chat(char_name, message)
+                self.on_chat(char_name, message, self.room_id_to_path[room_id])
 
     def _handle_ChatInstantMessageToClient(self, pkt):
         player = pkt.get('player', '')
@@ -475,10 +493,8 @@ class SWGChatClient:
                 continue
 
             # Re-query room to verify membership
-            room_path = self.chat_room_path
-            if not room_path.startswith("SWG."):
-                room_path = f"SWG.{self.server_name}.{room_path}"
-            self._send_raw(self._encode_chat_query_room(room_path))
+            for room_path in self.chat_room_paths:
+                self._send_raw(self._encode_chat_query_room(self._normalize_room_path(room_path)))
 
             # Log metrics every 5 minutes
             uptime = int(time.time() - self.start_time)
@@ -494,6 +510,7 @@ class SWGChatClient:
             'uptime': int(time.time() - self.start_time),
             'connected': self.connected,
             'room_id': self.chat_room_id,
+            'rooms': dict(self.chat_room_ids),
             'reconnects': self.reconnect_count,
             'messages_sent': self.messages_sent,
             'messages_received': self.messages_received,
@@ -548,11 +565,14 @@ class ChatBridge(discord.Client):
         intents.members = True
         super().__init__(intents=intents)
 
-        self.swg_cfg = bot_cfg['SWG']
+        self.swg_cfg = dict(bot_cfg['SWG'])
         self.discord_cfg = bot_cfg['Discord']
         self.config_name = config_name
         self.bot_name = self.discord_cfg.get('BotName', config_name)
         self.log = logging.getLogger(config_name)
+
+        self.room_mappings = self._build_room_mappings(self.swg_cfg, self.discord_cfg)
+        self.swg_cfg['ChatRooms'] = [mapping['chat_room'] for mapping in self.room_mappings]
 
         self.swg = SWGChatClient(
             self.swg_cfg,
@@ -563,6 +583,7 @@ class ChatBridge(discord.Client):
         )
 
         self.chat_channel = None
+        self.room_channels = {}  # normalized SWG room path -> discord.TextChannel
         self.notification_channel = None
         self.notification_tag = ""
         self.notification_user_id = self.discord_cfg.get('NotificationMentionUserID', '')
@@ -605,14 +626,24 @@ class ChatBridge(discord.Client):
             self.log.error(f"Guild {self.discord_cfg['ServerID']} not found!")
             return
 
-        for ch in self.server_guild.text_channels:
-            if ch.name == self.discord_cfg['ChatChannel']:
+        channels_by_name = {ch.name: ch for ch in self.server_guild.text_channels}
+        for mapping in self.room_mappings:
+            ch = channels_by_name.get(mapping['chat_channel'])
+            room_path = mapping['chat_room']
+            if not ch:
+                self.log.error(f"Chat channel '{mapping['chat_channel']}' not found for room '{room_path}'")
+                continue
+            normalized_room = self.swg._normalize_room_path(room_path)
+            self.room_channels[normalized_room] = ch
+            if not self.chat_channel:
                 self.chat_channel = ch
-            if ch.name == self.discord_cfg.get('NotificationChannel', ''):
-                self.notification_channel = ch
+
+        notify_name = self.discord_cfg.get('NotificationChannel', '')
+        if notify_name:
+            self.notification_channel = channels_by_name.get(notify_name)
 
         if not self.chat_channel:
-            self.log.error(f"Chat channel '{self.discord_cfg['ChatChannel']}' not found!")
+            self.log.error("No chat channels were resolved from ChatRoom/ChatChannel mappings")
 
         role_name = self.discord_cfg.get('NotificationMentionRole', '')
         role = discord.utils.get(self.server_guild.roles, name=role_name) if role_name else None
@@ -651,8 +682,9 @@ class ChatBridge(discord.Client):
 
         # Guild messages: only from chat or notification channel
         if isinstance(message.channel, discord.TextChannel):
-            if message.channel.name not in (self.discord_cfg['ChatChannel'],
-                                             self.discord_cfg.get('NotificationChannel', '')):
+            mapped_channels = {m['chat_channel'] for m in self.room_mappings}
+            mapped_channels.add(self.discord_cfg.get('NotificationChannel', ''))
+            if message.channel.name not in mapped_channels:
                 return
 
         # Resolve display name
@@ -678,7 +710,8 @@ class ChatBridge(discord.Client):
             uptime_m = (stats['uptime'] % 3600) // 60
             await message.reply(
                 f"**{self.bot_name}** — {'Connected' if stats['connected'] else 'Disconnected'}\n"
-                f"Uptime: {uptime_h}h {uptime_m}m | Room: {stats['room_id']}\n"
+                f"Uptime: {uptime_h}h {uptime_m}m | Primary Room: {stats['room_id']}\n"
+                f"Rooms joined: {len(stats['rooms'])}/{len(self.room_mappings)}\n"
                 f"Reconnects: {stats['reconnects']} | In: {stats['messages_received']} | Out: {stats['messages_sent']}")
 
         elif content.startswith('!fixchat'):
@@ -722,11 +755,44 @@ class ChatBridge(discord.Client):
         self.log.error(f"Discord send FAILED after {retries} attempts: {content[:100]}")
         return False
 
-    def _relay_chat(self, player, message):
+    def _relay_chat(self, player, message, room_path):
         """Called by SWG client when game chat is received."""
-        if self.chat_channel:
+        target_channel = self.room_channels.get(room_path, self.chat_channel)
+        if target_channel:
             asyncio.ensure_future(
-                self._send_to_discord(self.chat_channel, f"**{player}:**  {message}"))
+                self._send_to_discord(target_channel, f"**{player}:**  {message}"))
+
+    @staticmethod
+    def _build_room_mappings(swg_cfg, discord_cfg):
+        """Normalize room/channel mappings from config."""
+        mappings = []
+        for entry in swg_cfg.get('ChatBridges', []):
+            if isinstance(entry, dict) and entry.get('ChatRoom') and entry.get('ChatChannel'):
+                mappings.append({
+                    'chat_room': entry['ChatRoom'],
+                    'chat_channel': entry['ChatChannel'],
+                })
+
+        if not mappings:
+            mappings.append({
+                'chat_room': swg_cfg.get('ChatRoom'),
+                'chat_channel': discord_cfg.get('ChatChannel'),
+            })
+
+        # Remove invalid and duplicate room mappings while preserving order
+        deduped = []
+        seen = set()
+        for mapping in mappings:
+            room = mapping.get('chat_room')
+            channel = mapping.get('chat_channel')
+            if not room or not channel:
+                continue
+            key = (room, channel)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(mapping)
+        return deduped
 
     def _relay_tell(self, player, message):
         """Called by SWG client when a tell is received."""
@@ -769,6 +835,18 @@ def validate_config(cfg, filename):
         int(cfg['Discord']['ServerID'])
     except (ValueError, TypeError):
         return f"ServerID must be a valid integer"
+
+    mappings = cfg['SWG'].get('ChatBridges', [])
+    if mappings:
+        if not isinstance(mappings, list):
+            return "SWG.ChatBridges must be a list when provided"
+        for i, mapping in enumerate(mappings):
+            if not isinstance(mapping, dict):
+                return f"SWG.ChatBridges[{i}] must be an object"
+            if not mapping.get('ChatRoom') or not mapping.get('ChatChannel'):
+                return f"SWG.ChatBridges[{i}] must include ChatRoom and ChatChannel"
+    elif 'ChatRoom' not in cfg['SWG'] or 'ChatChannel' not in cfg['Discord']:
+        return "must provide either SWG.ChatBridges[] mappings or legacy SWG.ChatRoom + Discord.ChatChannel"
 
     return None
 
