@@ -21,6 +21,7 @@ import time
 import logging
 import signal
 import pathlib
+import socket
 
 import discord
 
@@ -64,8 +65,10 @@ class SWGChatClient:
 
         # State
         self.host = cfg['LoginAddress']
-        self.port = cfg['LoginPort']
+        self.port = int(cfg['LoginPort'])
         self.ping_port = None
+        self.remote_addr = None
+        self.addr_family = socket.AF_INET
         self.logged_in = False
         self.connected = False
         self.paused = False
@@ -128,20 +131,43 @@ class SWGChatClient:
         self.logged_in = False
         self.connected = False
         self.host = self.cfg['LoginAddress']
-        self.port = self.cfg['LoginPort']
+        self.port = int(self.cfg['LoginPort'])
         self.ping_port = None
+        self.remote_addr = None
         self.protocol = SOEProtocol()
 
         if self.transport:
             self.transport.close()
 
+        family, sockaddr = self._resolve_remote(self.host, self.port)
+        self.addr_family = family
+        self.remote_addr = sockaddr
+
+        local_addr = ('0.0.0.0', 0)
+        if family == socket.AF_INET6:
+            local_addr = ('::', 0, 0, 0)
+
+        udp_sock = socket.socket(family, socket.SOCK_DGRAM)
+        udp_sock.bind(local_addr)
+        if os.name == 'nt' and hasattr(socket, 'SIO_UDP_CONNRESET'):
+            # Ignore ICMP "port unreachable" as socket-level hard errors on Windows.
+            # Without this, Windows can surface WinError 10022/10054 via error_received.
+            udp_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+
         loop = asyncio.get_running_loop()
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _UDPProtocol(self._on_data),
-            local_addr=('0.0.0.0', 0)
+            sock=udp_sock,
         )
         self.transport = transport
+        self.log.info(f"UDP endpoint {local_addr} -> {self.remote_addr}")
         self._send_raw(self.protocol.encode_session_request())
+
+    @staticmethod
+    def _resolve_remote(host, port):
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        family, _, _, _, sockaddr = infos[0]
+        return family, sockaddr
 
     def _send_raw(self, data):
         """Send raw bytes to current server."""
@@ -149,9 +175,9 @@ class SWGChatClient:
             return
         if isinstance(data, list):
             for d in data:
-                self.transport.sendto(bytes(d), (self.host, self.port))
+                self.transport.sendto(bytes(d), self.remote_addr)
         else:
-            self.transport.sendto(bytes(data), (self.host, self.port))
+            self.transport.sendto(bytes(data), self.remote_addr)
 
     def _on_data(self, data, addr):
         """Handle incoming UDP packet."""
@@ -217,8 +243,34 @@ class SWGChatClient:
 
         server_id = character['server_id']
         server_data = self.servers.get(server_id, {})
-        self.port = server_data.get('port', self.port)
-        self.ping_port = server_data.get('ping_port')
+        zone_ip = server_data.get('ip')
+        if zone_ip:
+            self.host = zone_ip
+        try:
+            self.port = int(server_data.get('port', self.port))
+        except (TypeError, ValueError):
+            self.log.warning(f"Invalid zone port in server data: {server_data.get('port')!r}; keeping {self.port}")
+        ping_port = server_data.get('ping_port')
+        if ping_port is not None:
+            try:
+                self.ping_port = int(ping_port)
+            except (TypeError, ValueError):
+                self.log.warning(f"Invalid ping port in server data: {ping_port!r}; disabling ping")
+                self.ping_port = None
+
+        try:
+            family, sockaddr = self._resolve_remote(self.host, self.port)
+            if family != self.addr_family:
+                self.log.warning(
+                    f"Zone endpoint family changed ({self.addr_family} -> {family}); reconnecting socket"
+                )
+                asyncio.ensure_future(self._reconnect())
+                return
+            self.remote_addr = sockaddr
+            self.log.info(f"Switching UDP remote endpoint -> {self.remote_addr}")
+        except OSError as e:
+            self.log.error(f"Failed to resolve zone endpoint {self.host}:{self.port}: {e}")
+            return
         self.character_id = character['character_id']
 
         if server_id in self.server_names:
@@ -475,7 +527,11 @@ class SWGChatClient:
             struct.pack_into('>H', buf, 0, tick)
             struct.pack_into('>H', buf, 2, 0x7701)
             if self.transport:
-                self.transport.sendto(bytes(buf), (self.host, self.ping_port))
+                if self.addr_family == socket.AF_INET6 and len(self.remote_addr) == 4:
+                    ping_addr = (self.remote_addr[0], self.ping_port, self.remote_addr[2], self.remote_addr[3])
+                else:
+                    ping_addr = (self.remote_addr[0], self.ping_port)
+                self.transport.sendto(bytes(buf), ping_addr)
 
     async def _netstatus_loop(self):
         """Send net status every 15 seconds."""
@@ -559,14 +615,13 @@ class ChatBridge(discord.Client):
     """Discord client that bridges to SWG chat."""
 
     def __init__(self, bot_cfg, config_name):
+        self.discord_cfg = bot_cfg['Discord']
         intents = discord.Intents.default()
-        intents.message_content = True
+        intents.message_content = bool(self.discord_cfg.get('EnableMessageContentIntent', False))
         intents.guilds = True
-        intents.members = True
         super().__init__(intents=intents)
 
         self.swg_cfg = dict(bot_cfg['SWG'])
-        self.discord_cfg = bot_cfg['Discord']
         self.config_name = config_name
         self.bot_name = self.discord_cfg.get('BotName', config_name)
         self.log = logging.getLogger(config_name)
@@ -836,6 +891,14 @@ def validate_config(cfg, filename):
     except (ValueError, TypeError):
         return f"ServerID must be a valid integer"
 
+    try:
+        login_port = int(cfg['SWG']['LoginPort'])
+    except (ValueError, TypeError):
+        return f"SWG.LoginPort must be a valid integer"
+    if login_port <= 0 or login_port > 65535:
+        return f"SWG.LoginPort must be between 1 and 65535"
+    cfg['SWG']['LoginPort'] = login_port
+
     mappings = cfg['SWG'].get('ChatBridges', [])
     if mappings:
         if not isinstance(mappings, list):
@@ -906,12 +969,24 @@ async def run_bot(name, bot_cfg):
         except asyncio.CancelledError:
             log.info("Shutting down")
             break
+        except discord.PrivilegedIntentsRequired as e:
+            log.error(f"Crashed: {e}")
+            log.error(
+                "Fatal configuration error: this bot requested privileged intents that are not enabled. "
+                "Either enable the required intents in the Discord Developer Portal, or set "
+                "Discord.EnableMessageContentIntent to false in this bot's config."
+            )
+            break
         except Exception as e:
             log.error(f"Crashed: {e}")
         finally:
             if bridge:
                 try:
                     await bridge.swg.disconnect()
+                except Exception:
+                    pass
+                try:
+                    await bridge.close()
                 except Exception:
                     pass
 
@@ -932,6 +1007,20 @@ async def _healthcheck_loop():
 
 async def run_all(config_path):
     """Load configs and run bots with hot-reload — watches for added/removed config files."""
+    def _install_signal_handlers(cancel_cb):
+        """Install SIGINT/SIGTERM handlers where supported (Unix)."""
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, cancel_cb)
+            except NotImplementedError:
+                # Windows asyncio event loops may not support add_signal_handler.
+                main_log.warning(
+                    "Signal handlers not supported on this platform; "
+                    "use Ctrl+C to stop the bridge."
+                )
+                return
+
     path = pathlib.Path(config_path)
     if not path.is_dir():
         # Single file mode — no hot reload
@@ -942,9 +1031,7 @@ async def run_all(config_path):
         main_log.info(f"Starting {len(configs)} bot(s) (single file, no hot-reload)")
         tasks = [asyncio.create_task(run_bot(name, cfg)) for name, cfg in configs]
         tasks.append(asyncio.create_task(_healthcheck_loop()))
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: [t.cancel() for t in tasks])
+        _install_signal_handlers(lambda: [t.cancel() for t in tasks])
         await asyncio.gather(*tasks, return_exceptions=True)
         main_log.info("All bots stopped")
         return
@@ -960,9 +1047,7 @@ async def run_all(config_path):
         for t in all_tasks:
             t.cancel()
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _cancel_all)
+    _install_signal_handlers(_cancel_all)
 
     async def _config_watcher():
         """Scan config directory every 10 seconds for changes."""

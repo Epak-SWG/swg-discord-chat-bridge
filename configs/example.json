@@ -39,6 +39,8 @@
             "444444444444444444": "#rebel-command",
             "555555555555555555": "#droid-workshop"
         },
+        "EnableMessageContentIntent": false,
+        "_CommentEnableMessageContentIntent": "Set true only if Message Content intent is enabled in Discord Developer Portal.",
         "AutoRestartTimer": 0,
         "verboseDiscordLogging": false
     }
